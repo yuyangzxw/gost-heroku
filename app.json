@@ -1,14 +1,14 @@
 {
-  "name": "Start on Heroku: Go",
-  "description": "Go Getting Started Example App",
+  "name": "gost-heroku",
+  "description": "gost-heroku",
   "keywords": [
-    "getting-started",
+    "gost-heroku",
     "go",
-    "sample",
-    "example"
+    "gost",
+    "heroku"
   ],
-  "image": "heroku/go:1.6",
-  "mount_dir": "src/github.com/heroku/go-getting-started",
-  "website": "http://github.com/heroku/go-getting-started",
-  "repository": "http://github.com/heroku/go-getting-started"
+  "image": "heroku/go:1.10",
+  "mount_dir": "src/github.com/xuiv01/gost-heroku",
+  "website": "http://github.com/xuiv01/gost-heroku",
+  "repository": "http://github.com/xuiv01/gost-heroku"
 }
