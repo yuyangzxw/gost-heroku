@@ -193,8 +193,7 @@
 		},
 		{
 			"ImportPath": "github.com/shadowsocks/shadowsocks-go/shadowsocks",
-			"Comment": "1.2.1-17-g924943c",
-			"Rev": "924943c5f5da423cc66747fdf0d6ca1052db200a"
+			"Rev": "a85dc7de5280afab4b01bc94e66278561b6374c4"
 		},
 		{
 			"ImportPath": "golang.org/x/crypto/blowfish",
