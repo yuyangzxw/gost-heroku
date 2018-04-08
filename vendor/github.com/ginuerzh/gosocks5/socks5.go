@@ -4,12 +4,12 @@
 package gosocks5
 
 import (
-	//"bytes"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	//"log"
+	"io/ioutil"
 	"net"
 	"strconv"
 	"sync"
@@ -516,8 +516,9 @@ func (r *Reply) Write(w io.Writer) (err error) {
 	b[1] = r.Rep
 	b[2] = 0        //rsv
 	b[3] = AddrIPv4 // default
-
 	length := 10
+	b[4], b[5], b[6], b[7], b[8], b[9] = 0, 0, 0, 0, 0, 0 // reset address field
+
 	if r.Addr != nil {
 		n, _ := r.Addr.Encode(b[3:])
 		length = 3 + n
@@ -593,11 +594,13 @@ func NewUDPDatagram(header *UDPHeader, data []byte) *UDPDatagram {
 }
 
 func ReadUDPDatagram(r io.Reader) (*UDPDatagram, error) {
-	// b := make([]byte, 65797)
 	b := lPool.Get().([]byte)
 	defer lPool.Put(b)
 
-	n, err := io.ReadAtLeast(r, b, 5)
+	// when r is a streaming (such as TCP connection), we may read more than the required data,
+	// but we don't know how to handle it. So we use io.ReadFull to instead of io.ReadAtLeast
+	// to make sure that no redundant data will be discarded.
+	n, err := io.ReadFull(r, b[:5])
 	if err != nil {
 		return nil, err
 	}
@@ -620,16 +623,20 @@ func ReadUDPDatagram(r io.Reader) (*UDPDatagram, error) {
 		return nil, ErrBadAddrType
 	}
 
-	// extended feature, for udp over tcp, using reserved field for data length
 	dlen := int(header.Rsv)
-	if n < hlen+dlen {
+	if dlen == 0 { // standard SOCKS5 UDP datagram
+		extra, err := ioutil.ReadAll(r) // we assume no redundant data
+		if err != nil {
+			return nil, err
+		}
+		copy(b[n:], extra)
+		n += len(extra) // total length
+		dlen = n - hlen // data length
+	} else { // extended feature, for UDP over TCP, using reserved field as data length
 		if _, err := io.ReadFull(r, b[n:hlen+dlen]); err != nil {
 			return nil, err
 		}
 		n = hlen + dlen
-	}
-	if dlen == 0 {
-		dlen = n - hlen
 	}
 
 	header.Addr = new(Addr)
@@ -653,10 +660,14 @@ func (d *UDPDatagram) Write(w io.Writer) error {
 	if h == nil {
 		h = &UDPHeader{}
 	}
-	if err := h.Write(w); err != nil {
+	buf := bytes.Buffer{}
+	if err := h.Write(&buf); err != nil {
 		return err
 	}
-	_, err := w.Write(d.Data)
+	if _, err := buf.Write(d.Data); err != nil {
+		return err
+	}
 
+	_, err := buf.WriteTo(w)
 	return err
 }
