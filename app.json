@@ -7,6 +7,24 @@
     "gost",
     "heroku"
   ],
+    "env": {
+    "AUXPORT": {
+      "description": "gost socket5 port",
+      "value": "9090"
+    },    
+    "NGROK_API_TOKEN": {
+      "description": "ngrok authtoken",
+      "value": "4bzM2n2AJwEH3jD2mTxWP_6Vmy6iihkUa2HaDmCmv8j"
+    },    
+    "NGROK_COMMAND": {
+      "description": "ngrok protol",
+      "value": "tcp"
+    },
+    "NGROK_OPTS": {
+      "description": "other ngrok command options",
+      "value": ""
+    }
+  },
   "image": "heroku/go:1.10",
   "mount_dir": "src/github.com/xuiv01/gost-heroku",
   "website": "http://github.com/xuiv01/gost-heroku",
