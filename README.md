@@ -3,6 +3,49 @@
 
 本地客户端执行：gost-heroku -L=:1080 -F=ss+wss://aes-128-cfb:1234567890@xxxxx.herokuapp.com:443
 
+挂ngrok的方法如下：
+```sh
+sudo apt-get install heroku
+git clone https://github.com/xuiv/gost-heroku.git
+cd gost-heroku
+```
+在app.json中添加如下内容：
+```
+  "env": {
+    "AUX_PORT": {
+      "description": "gost socket5 port",
+      "value": "9090"
+    },    
+    "NGROK_API_TOKEN": {
+      "description": "ngrok authtoken",
+      "value": "4bzM2n2AJwEH3jD2mTxWP_6Vmy6iihkUa2HaDmCmv80" <-- 此处换成你的ngro认证字符串
+    },    
+    "NGROK_COMMAND": {
+      "description": "ngrok protol",
+      "value": "tcp"
+    },
+    "NGROK_OPTS": {
+      "description": "other ngrok command options",
+      "value": ""
+    }
+  },
+```
+修改Procfile为：
+```
+web: with_ngrok gost -L=ss+ws://aes-128-cfb:1234567890@:$PORT -L=socks5://:9090
+```
+接下来执行：
+```sh
+heroku create yourappid
+heroku config:set NGROK_API_TOKEN=4bzM2n2AJwEH3jD2mTxWP_6Vmy6iihkUa2HaDmCmv80 -a yourappid
+heroku config:set AUX_PORT=9090 -a yourappid
+heroku config:set NGROK_COMMAND=tcp  -a yourappid
+heroku buildpacks:add https://github.com/xuiv/heroku-buildpack-ngrok.git -a yourappid
+heroku buildpacks:add https://github.com/heroku/heroku-buildpack-go.git -a yourappid
+git push heroku master
+```
+去ngrok查看转发的域名和端口，这个是直接的soket5代理。
+
 # go-getting-started
 
 A barebones Go app, which can easily be deployed to Heroku.
