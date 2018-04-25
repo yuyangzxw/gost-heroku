@@ -114,14 +114,6 @@ func MinTime(a, b time.Time) time.Time {
 	return a
 }
 
-// MaxTime returns the later time
-func MaxTime(a, b time.Time) time.Time {
-	if a.After(b) {
-		return a
-	}
-	return b
-}
-
 // MaxPacketNumber returns the max packet number
 func MaxPacketNumber(a, b protocol.PacketNumber) protocol.PacketNumber {
 	if a > b {

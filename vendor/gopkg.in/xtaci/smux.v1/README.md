@@ -1,5 +1,4 @@
-<img src="smux.png" alt="smux" height="35px" />
-
+# SMUX
 [![GoDoc][1]][2] [![MIT licensed][3]][4] [![Build Status][5]][6] [![Go Report Card][7]][8] [![Coverage Statusd][9]][10]
 
 <img src="mux.jpg" alt="smux" height="120px" /> 
@@ -17,15 +16,14 @@
 
 ## Introduction
 
-Smux ( **S**imple **MU**ltiple**X**ing) is a multiplexing library for Golang. It relies on an underlying connection to provide reliability and ordering, such as TCP or [KCP](https://github.com/xtaci/kcp-go), and provides stream-oriented multiplexing. The original intention of this library is to power the connection management for [kcp-go](https://github.com/xtaci/kcp-go).
+Smux (***S***imple ***MU***ltiple***X***ing) is a multiplexing library for Golang. It relies on an underlying connection to provide reliability and ordering, such as TCP or [KCP](https://github.com/xtaci/kcp-go), and provides stream-oriented multiplexing.
 
 ## Features
 
 1. Tiny, less than 600 LOC.
 2. ***Token bucket*** controlled receiving, which provides smoother bandwidth graph(see picture below).
-3. Session-wide receive buffer, shared among streams, tightly controlled overall memory usage.
+3. Session-wide receive buffer, which is shared among streams.
 4. Minimized header(8Bytes), maximized payload. 
-5. Well-tested on millions of devices in [kcptun](https://github.com/xtaci/kcptun).
 
 ![smooth bandwidth curve](curve.jpg)
 

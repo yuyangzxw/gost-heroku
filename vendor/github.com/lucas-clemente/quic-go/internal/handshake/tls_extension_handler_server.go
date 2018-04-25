@@ -4,44 +4,36 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/lucas-clemente/quic-go/qerr"
 
 	"github.com/bifurcation/mint"
 	"github.com/bifurcation/mint/syntax"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
 )
 
 type extensionHandlerServer struct {
-	ourParams  *TransportParameters
-	paramsChan chan TransportParameters
+	params     *TransportParameters
+	paramsChan chan<- TransportParameters
 
 	version           protocol.VersionNumber
 	supportedVersions []protocol.VersionNumber
-
-	logger utils.Logger
 }
 
 var _ mint.AppExtensionHandler = &extensionHandlerServer{}
-var _ TLSExtensionHandler = &extensionHandlerServer{}
 
-// NewExtensionHandlerServer creates a new extension handler for the server
-func NewExtensionHandlerServer(
+func newExtensionHandlerServer(
 	params *TransportParameters,
+	paramsChan chan<- TransportParameters,
 	supportedVersions []protocol.VersionNumber,
 	version protocol.VersionNumber,
-	logger utils.Logger,
-) TLSExtensionHandler {
-	// Processing the ClientHello is performed statelessly (and from a single go-routine).
-	// Therefore, we have to use a buffered chan to pass the transport parameters to that go routine.
-	paramsChan := make(chan TransportParameters, 1)
+) *extensionHandlerServer {
 	return &extensionHandlerServer{
-		ourParams:         params,
+		params:            params,
 		paramsChan:        paramsChan,
-		supportedVersions: supportedVersions,
 		version:           version,
-		logger:            logger,
+		supportedVersions: supportedVersions,
 	}
 }
 
@@ -51,19 +43,16 @@ func (h *extensionHandlerServer) Send(hType mint.HandshakeType, el *mint.Extensi
 	}
 
 	transportParams := append(
-		h.ourParams.getTransportParameters(),
+		h.params.getTransportParameters(),
 		// TODO(#855): generate a real token
 		transportParameter{statelessResetTokenParameterID, bytes.Repeat([]byte{42}, 16)},
 	)
-	supportedVersions := protocol.GetGreasedVersions(h.supportedVersions)
-	versions := make([]uint32, len(supportedVersions))
-	for i, v := range supportedVersions {
-		versions[i] = uint32(v)
+	supportedVersions := make([]uint32, len(h.supportedVersions))
+	for i, v := range h.supportedVersions {
+		supportedVersions[i] = uint32(v)
 	}
-	h.logger.Debugf("Sending Transport Parameters: %s", h.ourParams)
 	data, err := syntax.Marshal(encryptedExtensionsTransportParameters{
-		NegotiatedVersion: uint32(h.version),
-		SupportedVersions: versions,
+		SupportedVersions: supportedVersions,
 		Parameters:        transportParams,
 	})
 	if err != nil {
@@ -74,10 +63,7 @@ func (h *extensionHandlerServer) Send(hType mint.HandshakeType, el *mint.Extensi
 
 func (h *extensionHandlerServer) Receive(hType mint.HandshakeType, el *mint.ExtensionList) error {
 	ext := &tlsExtensionBody{}
-	found, err := el.Find(ext)
-	if err != nil {
-		return err
-	}
+	found := el.Find(ext)
 
 	if hType != mint.HandshakeTypeClientHello {
 		if found {
@@ -94,11 +80,15 @@ func (h *extensionHandlerServer) Receive(hType mint.HandshakeType, el *mint.Exte
 		return err
 	}
 	initialVersion := protocol.VersionNumber(chtp.InitialVersion)
-
+	negotiatedVersion := protocol.VersionNumber(chtp.NegotiatedVersion)
+	// check that the negotiated version is the version we're currently using
+	if negotiatedVersion != h.version {
+		return qerr.Error(qerr.VersionNegotiationMismatch, "Inconsistent negotiated version")
+	}
 	// perform the stateless version negotiation validation:
 	// make sure that we would have sent a Version Negotiation Packet if the client offered the initial version
-	// this is the case if and only if the initial version is not contained in the supported versions
-	if initialVersion != h.version && protocol.IsSupportedVersion(h.supportedVersions, initialVersion) {
+	// this is the case when the initial version is not contained in the supported versions
+	if initialVersion != negotiatedVersion && protocol.IsSupportedVersion(h.supportedVersions, initialVersion) {
 		return qerr.Error(qerr.VersionNegotiationMismatch, "Client should have used the initial version")
 	}
 
@@ -108,15 +98,12 @@ func (h *extensionHandlerServer) Receive(hType mint.HandshakeType, el *mint.Exte
 			return errors.New("client sent a stateless reset token")
 		}
 	}
-	params, err := readTransportParameters(chtp.Parameters)
+	params, err := readTransportParamters(chtp.Parameters)
 	if err != nil {
 		return err
 	}
-	h.logger.Debugf("Received Transport Parameters: %s", params)
+	// TODO(#878): remove this when implementing the MAX_STREAM_ID frame
+	params.MaxStreams = math.MaxUint32
 	h.paramsChan <- *params
 	return nil
-}
-
-func (h *extensionHandlerServer) GetPeerParams() <-chan TransportParameters {
-	return h.paramsChan
 }

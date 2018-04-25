@@ -54,7 +54,7 @@ func newFEC(rxlimit, dataShards, parityShards int) *FEC {
 	fec.parityShards = parityShards
 	fec.shardSize = dataShards + parityShards
 	fec.paws = (0xffffffff/uint32(fec.shardSize) - 1) * uint32(fec.shardSize)
-	enc, err := reedsolomon.New(dataShards, parityShards, reedsolomon.WithMaxGoroutines(1))
+	enc, err := reedsolomon.New(dataShards, parityShards)
 	if err != nil {
 		return nil
 	}
@@ -88,7 +88,9 @@ func (fec *FEC) markFEC(data []byte) {
 	binary.LittleEndian.PutUint32(data, fec.next)
 	binary.LittleEndian.PutUint16(data[4:], typeFEC)
 	fec.next++
-	fec.next %= fec.paws
+	if fec.next >= fec.paws { // paws would only occurs in markFEC
+		fec.next = 0
+	}
 }
 
 // input a fec packet

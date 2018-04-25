@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/bifurcation/mint"
+	"github.com/lucas-clemente/quic-go/internal/crypto"
 )
 
 const (
@@ -29,17 +29,17 @@ type token struct {
 
 // A CookieGenerator generates Cookies
 type CookieGenerator struct {
-	cookieProtector mint.CookieProtector
+	cookieSource crypto.StkSource
 }
 
 // NewCookieGenerator initializes a new CookieGenerator
 func NewCookieGenerator() (*CookieGenerator, error) {
-	cookieProtector, err := mint.NewDefaultCookieProtector()
+	stkSource, err := crypto.NewStkSource()
 	if err != nil {
 		return nil, err
 	}
 	return &CookieGenerator{
-		cookieProtector: cookieProtector,
+		cookieSource: stkSource,
 	}, nil
 }
 
@@ -52,7 +52,7 @@ func (g *CookieGenerator) NewToken(raddr net.Addr) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return g.cookieProtector.NewToken(data)
+	return g.cookieSource.NewToken(data)
 }
 
 // DecodeToken decodes a Cookie
@@ -62,7 +62,7 @@ func (g *CookieGenerator) DecodeToken(encrypted []byte) (*Cookie, error) {
 		return nil, nil
 	}
 
-	data, err := g.cookieProtector.DecodeToken(encrypted)
+	data, err := g.cookieSource.DecodeToken(encrypted)
 	if err != nil {
 		return nil, err
 	}

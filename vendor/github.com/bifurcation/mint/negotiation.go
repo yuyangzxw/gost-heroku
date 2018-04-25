@@ -148,7 +148,7 @@ func CertificateSelection(serverName *string, signatureSchemes []SignatureScheme
 		}
 
 		if len(candidatesByName) == 0 {
-			return nil, 0, fmt.Errorf("No certificates available for server name: %s", *serverName)
+			return nil, 0, fmt.Errorf("No certificates available for server name")
 		}
 
 		candidates = candidatesByName
@@ -168,11 +168,10 @@ func CertificateSelection(serverName *string, signatureSchemes []SignatureScheme
 	return nil, 0, fmt.Errorf("No certificates compatible with signature schemes")
 }
 
-func EarlyDataNegotiation(usingPSK, gotEarlyData, allowEarlyData bool) (using bool, rejected bool) {
-	using = gotEarlyData && usingPSK && allowEarlyData
-	rejected = gotEarlyData && !using
-	logf(logTypeNegotiation, "Early data negotiation (%v, %v, %v) => %v, %v", usingPSK, gotEarlyData, allowEarlyData, using, rejected)
-	return
+func EarlyDataNegotiation(usingPSK, gotEarlyData, allowEarlyData bool) bool {
+	usingEarlyData := gotEarlyData && usingPSK && allowEarlyData
+	logf(logTypeNegotiation, "Early data negotiation (%v, %v, %v) => %v", usingPSK, gotEarlyData, allowEarlyData, usingEarlyData)
+	return usingEarlyData
 }
 
 func CipherSuiteNegotiation(psk *PreSharedKey, offered, supported []CipherSuite) (CipherSuite, error) {

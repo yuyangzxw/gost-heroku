@@ -11,7 +11,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Stream implements net.Conn
+// Stream implements io.ReadWriteCloser
 type Stream struct {
 	id            uint32
 	rstflag       int32
@@ -37,30 +37,24 @@ func newStream(id uint32, frameSize int, sess *Session) *Stream {
 	return s
 }
 
-// ID returns the unique stream ID.
-func (s *Stream) ID() uint32 {
-	return s.id
-}
-
-// Read implements net.Conn
+// Read implements io.ReadWriteCloser
 func (s *Stream) Read(b []byte) (n int, err error) {
-	if len(b) == 0 {
-		select {
-		case <-s.die:
-			return 0, errors.New(errBrokenPipe)
-		default:
-			return 0, nil
-		}
-	}
-
 	var deadline <-chan time.Time
 	if d, ok := s.readDeadline.Load().(time.Time); ok && !d.IsZero() {
-		timer := time.NewTimer(time.Until(d))
+		timer := time.NewTimer(d.Sub(time.Now()))
 		defer timer.Stop()
 		deadline = timer.C
 	}
 
 READ:
+	select {
+	case <-s.die:
+		return 0, errors.New(errBrokenPipe)
+	case <-deadline:
+		return n, errTimeout
+	default:
+	}
+
 	s.bufferLock.Lock()
 	n, err = s.buffer.Read(b)
 	s.bufferLock.Unlock()
@@ -83,11 +77,11 @@ READ:
 	}
 }
 
-// Write implements net.Conn
+// Write implements io.ReadWriteCloser
 func (s *Stream) Write(b []byte) (n int, err error) {
 	var deadline <-chan time.Time
 	if d, ok := s.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
-		timer := time.NewTimer(time.Until(d))
+		timer := time.NewTimer(d.Sub(time.Now()))
 		defer timer.Stop()
 		deadline = timer.C
 	}
@@ -129,7 +123,7 @@ func (s *Stream) Write(b []byte) (n int, err error) {
 	return sent, nil
 }
 
-// Close implements net.Conn
+// Close implements io.ReadWriteCloser
 func (s *Stream) Close() error {
 	s.dieLock.Lock()
 
@@ -141,7 +135,7 @@ func (s *Stream) Close() error {
 		close(s.die)
 		s.dieLock.Unlock()
 		s.sess.streamClosed(s.id)
-		_, err := s.sess.writeFrame(newFrame(cmdFIN, s.id))
+		_, err := s.sess.writeFrame(newFrame(cmdRST, s.id))
 		return err
 	}
 }
@@ -225,7 +219,7 @@ func (s *Stream) recycleTokens() (n int) {
 
 // split large byte buffer into smaller frames, reference only
 func (s *Stream) split(bts []byte, cmd byte, sid uint32) []Frame {
-	frames := make([]Frame, 0, len(bts)/s.frameSize+1)
+	var frames []Frame
 	for len(bts) > s.frameSize {
 		frame := newFrame(cmd, sid)
 		frame.data = bts[:s.frameSize]

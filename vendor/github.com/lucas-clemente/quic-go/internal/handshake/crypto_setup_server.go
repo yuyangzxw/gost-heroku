@@ -19,12 +19,10 @@ import (
 type QuicCryptoKeyDerivationFunction func(forwardSecure bool, sharedSecret, nonces []byte, connID protocol.ConnectionID, chlo []byte, scfg []byte, cert []byte, divNonce []byte, pers protocol.Perspective) (crypto.AEAD, error)
 
 // KeyExchangeFunction is used to make a new KEX
-type KeyExchangeFunction func() (crypto.KeyExchange, error)
+type KeyExchangeFunction func() crypto.KeyExchange
 
 // The CryptoSetupServer handles all things crypto for the Session
 type cryptoSetupServer struct {
-	mutex sync.RWMutex
-
 	connID               protocol.ConnectionID
 	remoteAddr           net.Addr
 	scfg                 *ServerConfig
@@ -44,7 +42,7 @@ type cryptoSetupServer struct {
 
 	receivedParams bool
 	paramsChan     chan<- TransportParameters
-	handshakeEvent chan<- struct{}
+	aeadChanged    chan<- protocol.EncryptionLevel
 
 	keyDerivation QuicCryptoKeyDerivationFunction
 	keyExchange   KeyExchangeFunction
@@ -53,9 +51,7 @@ type cryptoSetupServer struct {
 
 	params *TransportParameters
 
-	sni string // need to fill out the ConnectionState
-
-	logger utils.Logger
+	mutex sync.RWMutex
 }
 
 var _ CryptoSetup = &cryptoSetupServer{}
@@ -75,36 +71,32 @@ func NewCryptoSetup(
 	connID protocol.ConnectionID,
 	remoteAddr net.Addr,
 	version protocol.VersionNumber,
-	divNonce []byte,
 	scfg *ServerConfig,
 	params *TransportParameters,
 	supportedVersions []protocol.VersionNumber,
 	acceptSTK func(net.Addr, *Cookie) bool,
 	paramsChan chan<- TransportParameters,
-	handshakeEvent chan<- struct{},
-	logger utils.Logger,
+	aeadChanged chan<- protocol.EncryptionLevel,
 ) (CryptoSetup, error) {
 	nullAEAD, err := crypto.NewNullAEAD(protocol.PerspectiveServer, connID, version)
 	if err != nil {
 		return nil, err
 	}
 	return &cryptoSetupServer{
-		cryptoStream:         cryptoStream,
-		connID:               connID,
-		remoteAddr:           remoteAddr,
-		version:              version,
-		supportedVersions:    supportedVersions,
-		diversificationNonce: divNonce,
-		scfg:                 scfg,
-		keyDerivation:        crypto.DeriveQuicCryptoAESKeys,
-		keyExchange:          getEphermalKEX,
-		nullAEAD:             nullAEAD,
-		params:               params,
-		acceptSTKCallback:    acceptSTK,
-		sentSHLO:             make(chan struct{}),
-		paramsChan:           paramsChan,
-		handshakeEvent:       handshakeEvent,
-		logger:               logger,
+		cryptoStream:      cryptoStream,
+		connID:            connID,
+		remoteAddr:        remoteAddr,
+		version:           version,
+		supportedVersions: supportedVersions,
+		scfg:              scfg,
+		keyDerivation:     crypto.DeriveQuicCryptoAESKeys,
+		keyExchange:       getEphermalKEX,
+		nullAEAD:          nullAEAD,
+		params:            params,
+		acceptSTKCallback: acceptSTK,
+		sentSHLO:          make(chan struct{}),
+		paramsChan:        paramsChan,
+		aeadChanged:       aeadChanged,
 	}, nil
 }
 
@@ -120,7 +112,7 @@ func (h *cryptoSetupServer) HandleCryptoStream() error {
 			return qerr.InvalidCryptoMessageType
 		}
 
-		h.logger.Debugf("Got %s", message)
+		utils.Debugf("Got %s", message)
 		done, err := h.handleMessage(chloData.Bytes(), message.Data)
 		if err != nil {
 			return err
@@ -147,7 +139,6 @@ func (h *cryptoSetupServer) handleMessage(chloData []byte, cryptoData map[Tag][]
 	if sni == "" {
 		return false, qerr.Error(qerr.CryptoMessageParameterNotFound, "SNI required")
 	}
-	h.sni = sni
 
 	// prevent version downgrade attacks
 	// see https://groups.google.com/a/chromium.org/forum/#!topic/proto-quic/N-de9j63tCk for a discussion and examples
@@ -191,7 +182,7 @@ func (h *cryptoSetupServer) handleMessage(chloData []byte, cryptoData map[Tag][]
 		if _, err := h.cryptoStream.Write(reply); err != nil {
 			return false, err
 		}
-		h.handshakeEvent <- struct{}{}
+		h.aeadChanged <- protocol.EncryptionForwardSecure
 		close(h.sentSHLO)
 		return true, nil
 	}
@@ -215,9 +206,9 @@ func (h *cryptoSetupServer) Open(dst, src []byte, packetNumber protocol.PacketNu
 		if err == nil {
 			if !h.receivedForwardSecurePacket { // this is the first forward secure packet we receive from the client
 				h.receivedForwardSecurePacket = true
-				// wait for the send on the handshakeEvent chan
+				// wait until protocol.EncryptionForwardSecure was sent on the aeadChan
 				<-h.sentSHLO
-				close(h.handshakeEvent)
+				close(h.aeadChanged)
 			}
 			return res, protocol.EncryptionForwardSecure, nil
 		}
@@ -303,13 +294,17 @@ func (h *cryptoSetupServer) isInchoateCHLO(cryptoData map[Tag][]byte, cert []byt
 func (h *cryptoSetupServer) acceptSTK(token []byte) bool {
 	stk, err := h.scfg.cookieGenerator.DecodeToken(token)
 	if err != nil {
-		h.logger.Debugf("STK invalid: %s", err.Error())
+		utils.Debugf("STK invalid: %s", err.Error())
 		return false
 	}
 	return h.acceptSTKCallback(h.remoteAddr, stk)
 }
 
 func (h *cryptoSetupServer) handleInchoateCHLO(sni string, chlo []byte, cryptoData map[Tag][]byte) ([]byte, error) {
+	if len(chlo) < protocol.ClientHelloMinimumSize {
+		return nil, qerr.Error(qerr.CryptoInvalidValueLength, "CHLO too small")
+	}
+
 	token, err := h.scfg.cookieGenerator.NewToken(h.remoteAddr)
 	if err != nil {
 		return nil, err
@@ -346,7 +341,7 @@ func (h *cryptoSetupServer) handleInchoateCHLO(sni string, chlo []byte, cryptoDa
 
 	var serverReply bytes.Buffer
 	message.Write(&serverReply)
-	h.logger.Debugf("Sending %s", message)
+	utils.Debugf("Sending %s", message)
 	return serverReply.Bytes(), nil
 }
 
@@ -367,6 +362,11 @@ func (h *cryptoSetupServer) handleCHLO(sni string, data []byte, cryptoData map[T
 
 	serverNonce := make([]byte, 32)
 	if _, err = rand.Read(serverNonce); err != nil {
+		return nil, err
+	}
+
+	h.diversificationNonce = make([]byte, 32)
+	if _, err = rand.Read(h.diversificationNonce); err != nil {
 		return nil, err
 	}
 
@@ -400,16 +400,14 @@ func (h *cryptoSetupServer) handleCHLO(sni string, data []byte, cryptoData map[T
 	if err != nil {
 		return nil, err
 	}
-	h.handshakeEvent <- struct{}{}
+
+	h.aeadChanged <- protocol.EncryptionSecure
 
 	// Generate a new curve instance to derive the forward secure key
 	var fsNonce bytes.Buffer
 	fsNonce.Write(clientNonce)
 	fsNonce.Write(serverNonce)
-	ephermalKex, err := h.keyExchange()
-	if err != nil {
-		return nil, err
-	}
+	ephermalKex := h.keyExchange()
 	ephermalSharedSecret, err := ephermalKex.CalculateSharedKey(cryptoData[TagPUBS])
 	if err != nil {
 		return nil, err
@@ -447,17 +445,21 @@ func (h *cryptoSetupServer) handleCHLO(sni string, data []byte, cryptoData map[T
 	}
 	var reply bytes.Buffer
 	message.Write(&reply)
-	h.logger.Debugf("Sending %s", message)
+	utils.Debugf("Sending %s", message)
 	return reply.Bytes(), nil
 }
 
-func (h *cryptoSetupServer) ConnectionState() ConnectionState {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-	return ConnectionState{
-		ServerName:        h.sni,
-		HandshakeComplete: h.receivedForwardSecurePacket,
-	}
+// DiversificationNonce returns the diversification nonce
+func (h *cryptoSetupServer) DiversificationNonce() []byte {
+	return h.diversificationNonce
+}
+
+func (h *cryptoSetupServer) SetDiversificationNonce(data []byte) {
+	panic("not needed for cryptoSetupServer")
+}
+
+func (h *cryptoSetupServer) GetNextPacketType() protocol.PacketType {
+	panic("not needed for cryptoSetupServer")
 }
 
 func (h *cryptoSetupServer) validateClientNonce(nonce []byte) error {

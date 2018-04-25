@@ -25,27 +25,18 @@ type HandshakeMessageBody interface {
 //     Extension extensions<0..2^16-1>;
 // } ClientHello;
 type ClientHelloBody struct {
-	LegacyVersion   uint16
-	Random          [32]byte
-	LegacySessionID []byte
-	CipherSuites    []CipherSuite
-	Extensions      ExtensionList
+	// Omitted: clientVersion
+	// Omitted: legacySessionID
+	// Omitted: legacyCompressionMethods
+	Random       [32]byte
+	CipherSuites []CipherSuite
+	Extensions   ExtensionList
 }
 
-type clientHelloBodyInnerTLS struct {
+type clientHelloBodyInner struct {
 	LegacyVersion            uint16
 	Random                   [32]byte
 	LegacySessionID          []byte        `tls:"head=1,max=32"`
-	CipherSuites             []CipherSuite `tls:"head=2,min=2"`
-	LegacyCompressionMethods []byte        `tls:"head=1,min=1"`
-	Extensions               []Extension   `tls:"head=2"`
-}
-
-type clientHelloBodyInnerDTLS struct {
-	LegacyVersion            uint16
-	Random                   [32]byte
-	LegacySessionID          []byte `tls:"head=1,max=32"`
-	EmptyCookie              uint8
 	CipherSuites             []CipherSuite `tls:"head=2,min=2"`
 	LegacyCompressionMethods []byte        `tls:"head=1,min=1"`
 	Extensions               []Extension   `tls:"head=2"`
@@ -56,71 +47,35 @@ func (ch ClientHelloBody) Type() HandshakeType {
 }
 
 func (ch ClientHelloBody) Marshal() ([]byte, error) {
-	if ch.LegacyVersion == tls12Version {
-		return syntax.Marshal(clientHelloBodyInnerTLS{
-			LegacyVersion:            ch.LegacyVersion,
-			Random:                   ch.Random,
-			LegacySessionID:          []byte{},
-			CipherSuites:             ch.CipherSuites,
-			LegacyCompressionMethods: []byte{0},
-			Extensions:               ch.Extensions,
-		})
-	} else {
-		return syntax.Marshal(clientHelloBodyInnerDTLS{
-			LegacyVersion:            ch.LegacyVersion,
-			Random:                   ch.Random,
-			LegacySessionID:          []byte{},
-			CipherSuites:             ch.CipherSuites,
-			LegacyCompressionMethods: []byte{0},
-			Extensions:               ch.Extensions,
-		})
-	}
-
+	return syntax.Marshal(clientHelloBodyInner{
+		LegacyVersion:            0x0303,
+		Random:                   ch.Random,
+		LegacySessionID:          []byte{},
+		CipherSuites:             ch.CipherSuites,
+		LegacyCompressionMethods: []byte{0},
+		Extensions:               ch.Extensions,
+	})
 }
 
 func (ch *ClientHelloBody) Unmarshal(data []byte) (int, error) {
-	var read int
-	var err error
-
-	// Note that this might be 0, in which case we do TLS. That
-	// makes the tests easier.
-	if ch.LegacyVersion != dtls12WireVersion {
-		var inner clientHelloBodyInnerTLS
-		read, err = syntax.Unmarshal(data, &inner)
-		if err != nil {
-			return 0, err
-		}
-
-		if len(inner.LegacyCompressionMethods) != 1 || inner.LegacyCompressionMethods[0] != 0 {
-			return 0, fmt.Errorf("tls.clienthello: Invalid compression method")
-		}
-
-		ch.LegacyVersion = inner.LegacyVersion
-		ch.Random = inner.Random
-		ch.LegacySessionID = inner.LegacySessionID
-		ch.CipherSuites = inner.CipherSuites
-		ch.Extensions = inner.Extensions
-	} else {
-		var inner clientHelloBodyInnerDTLS
-		read, err = syntax.Unmarshal(data, &inner)
-		if err != nil {
-			return 0, err
-		}
-
-		if inner.EmptyCookie != 0 {
-			return 0, fmt.Errorf("tls.clienthello: Invalid cookie")
-		}
-
-		if len(inner.LegacyCompressionMethods) != 1 || inner.LegacyCompressionMethods[0] != 0 {
-			return 0, fmt.Errorf("tls.clienthello: Invalid compression method")
-		}
-
-		ch.LegacyVersion = inner.LegacyVersion
-		ch.Random = inner.Random
-		ch.LegacySessionID = inner.LegacySessionID
-		ch.CipherSuites = inner.CipherSuites
-		ch.Extensions = inner.Extensions
+	var inner clientHelloBodyInner
+	read, err := syntax.Unmarshal(data, &inner)
+	if err != nil {
+		return 0, err
 	}
+
+	// We are strict about these things because we only support 1.3
+	if inner.LegacyVersion != 0x0303 {
+		return 0, fmt.Errorf("tls.clienthello: Incorrect version number")
+	}
+
+	if len(inner.LegacyCompressionMethods) != 1 || inner.LegacyCompressionMethods[0] != 0 {
+		return 0, fmt.Errorf("tls.clienthello: Invalid compression method")
+	}
+
+	ch.Random = inner.Random
+	ch.CipherSuites = inner.CipherSuites
+	ch.Extensions = inner.Extensions
 	return read, nil
 }
 
@@ -135,14 +90,9 @@ func (ch ClientHelloBody) Truncated() ([]byte, error) {
 		return nil, fmt.Errorf("tls.clienthello.truncate: Last extension is not PSK")
 	}
 
-	body, err := ch.Marshal()
+	chm, err := HandshakeMessageFromBody(&ch)
 	if err != nil {
 		return nil, err
-	}
-	chm := &HandshakeMessage{
-		msgType: ch.Type(),
-		body:    body,
-		length:  uint32(len(body)),
 	}
 	chData := chm.Marshal()
 
@@ -166,20 +116,39 @@ func (ch ClientHelloBody) Truncated() ([]byte, error) {
 }
 
 // struct {
-//     ProtocolVersion legacy_version = 0x0303;    /* TLS v1.2 */
+//     ProtocolVersion server_version;
+//     CipherSuite	cipher_suite;
+//     Extension extensions<2..2^16-1>;
+// } HelloRetryRequest;
+type HelloRetryRequestBody struct {
+	Version     uint16
+	CipherSuite CipherSuite
+	Extensions  ExtensionList `tls:"head=2,min=2"`
+}
+
+func (hrr HelloRetryRequestBody) Type() HandshakeType {
+	return HandshakeTypeHelloRetryRequest
+}
+
+func (hrr HelloRetryRequestBody) Marshal() ([]byte, error) {
+	return syntax.Marshal(hrr)
+}
+
+func (hrr *HelloRetryRequestBody) Unmarshal(data []byte) (int, error) {
+	return syntax.Unmarshal(data, hrr)
+}
+
+// struct {
+//     ProtocolVersion version;
 //     Random random;
-//     opaque legacy_session_id_echo<0..32>;
 //     CipherSuite cipher_suite;
-//     uint8 legacy_compression_method = 0;
-//     Extension extensions<6..2^16-1>;
+//     Extension extensions<0..2^16-1>;
 // } ServerHello;
 type ServerHelloBody struct {
-	Version                 uint16
-	Random                  [32]byte
-	LegacySessionID         []byte `tls:"head=1,max=32"`
-	CipherSuite             CipherSuite
-	LegacyCompressionMethod uint8
-	Extensions              ExtensionList `tls:"head=2"`
+	Version     uint16
+	Random      [32]byte
+	CipherSuite CipherSuite
+	Extensions  ExtensionList `tls:"head=2"`
 }
 
 func (sh ServerHelloBody) Type() HandshakeType {

@@ -4,21 +4,18 @@ import (
 	"bytes"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
-	"github.com/lucas-clemente/quic-go/internal/utils"
 )
 
 // Header is the header of a QUIC packet.
 // It contains fields that are only needed for the gQUIC Public Header and the IETF draft Header.
 type Header struct {
-	Raw              []byte
-	ConnectionID     protocol.ConnectionID
-	OmitConnectionID bool
-	PacketNumberLen  protocol.PacketNumberLen
-	PacketNumber     protocol.PacketNumber
-	Version          protocol.VersionNumber // VersionNumber sent by the client
-
-	IsVersionNegotiation bool
-	SupportedVersions    []protocol.VersionNumber // Version Number sent in a Version Negotiation Packet by the server
+	Raw               []byte
+	ConnectionID      protocol.ConnectionID
+	OmitConnectionID  bool
+	PacketNumberLen   protocol.PacketNumberLen
+	PacketNumber      protocol.PacketNumber
+	Version           protocol.VersionNumber   // VersionNumber sent by the client
+	SupportedVersions []protocol.VersionNumber // Version Number sent in a Version Negotiation Packet by the server
 
 	// only needed for the gQUIC Public Header
 	VersionFlag          bool
@@ -43,15 +40,17 @@ func ParseHeaderSentByServer(b *bytes.Reader, version protocol.VersionNumber) (*
 	_ = b.UnreadByte() // unread the type byte
 
 	var isPublicHeader bool
-	if typeByte&0x80 > 0 { // gQUIC always has 0x80 unset. IETF Long Header or Version Negotiation
+	// As a client, we know the version of the packet that the server sent, except for Version Negotiation Packets.
+	if typeByte == 0x81 { // IETF draft Version Negotiation Packet
 		isPublicHeader = false
 	} else if typeByte&0xcf == 0x9 { // gQUIC Version Negotiation Packet
+		// IETF QUIC Version Negotiation Packets are sent with the Long Header (indicated by the 0x80 bit)
+		// gQUIC always has 0x80 unset
 		isPublicHeader = true
-	} else {
+	} else { // not a Version Negotiation Packet
 		// the client knows the version that this packet was sent with
 		isPublicHeader = !version.UsesTLS()
 	}
-
 	return parsePacketHeader(b, protocol.PerspectiveServer, isPublicHeader)
 }
 
@@ -63,13 +62,12 @@ func ParseHeaderSentByClient(b *bytes.Reader) (*Header, error) {
 	}
 	_ = b.UnreadByte() // unread the type byte
 
-	// In an IETF QUIC packet header
-	// * either 0x80 is set (for the Long Header)
-	// * or 0x8 is unset (for the Short Header)
-	// In a gQUIC Public Header
-	// * 0x80 is always unset and
-	// * and 0x8 is always set (this is the Connection ID flag, which the client always sets)
-	isPublicHeader := typeByte&0x88 == 0x8
+	// If this is a gQUIC header 0x80 and 0x40 will be set to 0.
+	// If this is an IETF QUIC header there are two options:
+	// * either 0x80 will be 1 (for the Long Header)
+	// * or 0x40 (the Connection ID Flag) will be 0 (for the Short Header), since we don't the client to omit it
+	isPublicHeader := typeByte&0xc0 == 0
+
 	return parsePacketHeader(b, protocol.PerspectiveClient, isPublicHeader)
 }
 
@@ -104,10 +102,10 @@ func (h *Header) GetLength(pers protocol.Perspective, version protocol.VersionNu
 }
 
 // Log logs the Header
-func (h *Header) Log(logger utils.Logger) {
+func (h *Header) Log() {
 	if h.isPublicHeader {
-		h.logPublicHeader(logger)
+		h.logPublicHeader()
 	} else {
-		h.logHeader(logger)
+		h.logHeader()
 	}
 }

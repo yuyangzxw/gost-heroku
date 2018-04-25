@@ -12,34 +12,24 @@ type windowUpdateFrame struct {
 	ByteOffset protocol.ByteCount
 }
 
-// parseWindowUpdateFrame parses a WINDOW_UPDATE frame
+// ParseWindowUpdateFrame parses a WINDOW_UPDATE frame
 // The frame returned is
 // * a MAX_STREAM_DATA frame, if the WINDOW_UPDATE applies to a stream
 // * a MAX_DATA frame, if the WINDOW_UPDATE applies to the connection
-func parseWindowUpdateFrame(r *bytes.Reader, _ protocol.VersionNumber) (Frame, error) {
-	if _, err := r.ReadByte(); err != nil { // read the TypeByte
-		return nil, err
-	}
-	streamID, err := utils.BigEndian.ReadUint32(r)
+func ParseWindowUpdateFrame(r *bytes.Reader, version protocol.VersionNumber) (Frame, error) {
+	f, err := ParseMaxStreamDataFrame(r, version)
 	if err != nil {
 		return nil, err
 	}
-	offset, err := utils.BigEndian.ReadUint64(r)
-	if err != nil {
-		return nil, err
+	if f.StreamID == 0 {
+		return &MaxDataFrame{ByteOffset: f.ByteOffset}, nil
 	}
-	if streamID == 0 {
-		return &MaxDataFrame{ByteOffset: protocol.ByteCount(offset)}, nil
-	}
-	return &MaxStreamDataFrame{
-		StreamID:   protocol.StreamID(streamID),
-		ByteOffset: protocol.ByteCount(offset),
-	}, nil
+	return f, nil
 }
 
-func (f *windowUpdateFrame) Write(b *bytes.Buffer, _ protocol.VersionNumber) error {
+func (f *windowUpdateFrame) Write(b *bytes.Buffer, version protocol.VersionNumber) error {
 	b.WriteByte(0x4)
-	utils.BigEndian.WriteUint32(b, uint32(f.StreamID))
-	utils.BigEndian.WriteUint64(b, uint64(f.ByteOffset))
+	utils.GetByteOrder(version).WriteUint32(b, uint32(f.StreamID))
+	utils.GetByteOrder(version).WriteUint64(b, uint64(f.ByteOffset))
 	return nil
 }

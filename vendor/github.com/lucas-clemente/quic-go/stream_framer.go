@@ -1,98 +1,174 @@
 package quic
 
 import (
-	"sync"
-
+	"github.com/lucas-clemente/quic-go/internal/flowcontrol"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/wire"
 )
 
 type streamFramer struct {
-	streamGetter streamGetter
-	cryptoStream cryptoStreamI
-	version      protocol.VersionNumber
+	streamsMap   *streamsMap
+	cryptoStream streamI
 
-	streamQueueMutex    sync.Mutex
-	activeStreams       map[protocol.StreamID]struct{}
-	streamQueue         []protocol.StreamID
-	hasCryptoStreamData bool
+	connFlowController flowcontrol.ConnectionFlowController
+
+	retransmissionQueue []*wire.StreamFrame
+	blockedFrameQueue   []wire.Frame
 }
 
 func newStreamFramer(
-	cryptoStream cryptoStreamI,
-	streamGetter streamGetter,
-	v protocol.VersionNumber,
+	cryptoStream streamI,
+	streamsMap *streamsMap,
+	cfc flowcontrol.ConnectionFlowController,
 ) *streamFramer {
 	return &streamFramer{
-		streamGetter:  streamGetter,
-		cryptoStream:  cryptoStream,
-		activeStreams: make(map[protocol.StreamID]struct{}),
-		version:       v,
+		streamsMap:         streamsMap,
+		cryptoStream:       cryptoStream,
+		connFlowController: cfc,
 	}
 }
 
-func (f *streamFramer) AddActiveStream(id protocol.StreamID) {
-	if id == f.version.CryptoStreamID() { // the crypto stream is handled separately
-		f.streamQueueMutex.Lock()
-		f.hasCryptoStreamData = true
-		f.streamQueueMutex.Unlock()
-		return
-	}
-	f.streamQueueMutex.Lock()
-	if _, ok := f.activeStreams[id]; !ok {
-		f.streamQueue = append(f.streamQueue, id)
-		f.activeStreams[id] = struct{}{}
-	}
-	f.streamQueueMutex.Unlock()
+func (f *streamFramer) AddFrameForRetransmission(frame *wire.StreamFrame) {
+	f.retransmissionQueue = append(f.retransmissionQueue, frame)
 }
 
-func (f *streamFramer) HasCryptoStreamData() bool {
-	f.streamQueueMutex.Lock()
-	hasCryptoStreamData := f.hasCryptoStreamData
-	f.streamQueueMutex.Unlock()
-	return hasCryptoStreamData
+func (f *streamFramer) PopStreamFrames(maxLen protocol.ByteCount) []*wire.StreamFrame {
+	fs, currentLen := f.maybePopFramesForRetransmission(maxLen)
+	return append(fs, f.maybePopNormalFrames(maxLen-currentLen)...)
 }
 
-func (f *streamFramer) PopCryptoStreamFrame(maxLen protocol.ByteCount) *wire.StreamFrame {
-	f.streamQueueMutex.Lock()
-	frame, hasMoreData := f.cryptoStream.popStreamFrame(maxLen)
-	f.hasCryptoStreamData = hasMoreData
-	f.streamQueueMutex.Unlock()
+func (f *streamFramer) PopBlockedFrame() wire.Frame {
+	if len(f.blockedFrameQueue) == 0 {
+		return nil
+	}
+	frame := f.blockedFrameQueue[0]
+	f.blockedFrameQueue = f.blockedFrameQueue[1:]
 	return frame
 }
 
-func (f *streamFramer) PopStreamFrames(maxTotalLen protocol.ByteCount) []*wire.StreamFrame {
-	var currentLen protocol.ByteCount
-	var frames []*wire.StreamFrame
-	f.streamQueueMutex.Lock()
-	// pop STREAM frames, until less than MinStreamFrameSize bytes are left in the packet
-	numActiveStreams := len(f.streamQueue)
-	for i := 0; i < numActiveStreams; i++ {
-		if maxTotalLen-currentLen < protocol.MinStreamFrameSize {
+func (f *streamFramer) HasFramesForRetransmission() bool {
+	return len(f.retransmissionQueue) > 0
+}
+
+func (f *streamFramer) HasCryptoStreamFrame() bool {
+	return f.cryptoStream.LenOfDataForWriting() > 0
+}
+
+// TODO(lclemente): This is somewhat duplicate with the normal path for generating frames.
+func (f *streamFramer) PopCryptoStreamFrame(maxLen protocol.ByteCount) *wire.StreamFrame {
+	if !f.HasCryptoStreamFrame() {
+		return nil
+	}
+	frame := &wire.StreamFrame{
+		StreamID: f.cryptoStream.StreamID(),
+		Offset:   f.cryptoStream.GetWriteOffset(),
+	}
+	frameHeaderBytes, _ := frame.MinLength(protocol.VersionWhatever) // can never error
+	frame.Data = f.cryptoStream.GetDataForWriting(maxLen - frameHeaderBytes)
+	return frame
+}
+
+func (f *streamFramer) maybePopFramesForRetransmission(maxLen protocol.ByteCount) (res []*wire.StreamFrame, currentLen protocol.ByteCount) {
+	for len(f.retransmissionQueue) > 0 {
+		frame := f.retransmissionQueue[0]
+		frame.DataLenPresent = true
+
+		frameHeaderLen, _ := frame.MinLength(protocol.VersionWhatever) // can never error
+		if currentLen+frameHeaderLen >= maxLen {
 			break
 		}
-		id := f.streamQueue[0]
-		f.streamQueue = f.streamQueue[1:]
-		// This should never return an error. Better check it anyway.
-		// The stream will only be in the streamQueue, if it enqueued itself there.
-		str, err := f.streamGetter.GetOrOpenSendStream(id)
-		// The stream can be nil if it completed after it said it had data.
-		if str == nil || err != nil {
-			delete(f.activeStreams, id)
-			continue
+
+		currentLen += frameHeaderLen
+
+		splitFrame := maybeSplitOffFrame(frame, maxLen-currentLen)
+		if splitFrame != nil { // StreamFrame was split
+			res = append(res, splitFrame)
+			currentLen += splitFrame.DataLen()
+			break
 		}
-		frame, hasMoreData := str.popStreamFrame(maxTotalLen - currentLen)
-		if hasMoreData { // put the stream back in the queue (at the end)
-			f.streamQueue = append(f.streamQueue, id)
-		} else { // no more data to send. Stream is not active any more
-			delete(f.activeStreams, id)
-		}
-		if frame == nil { // can happen if the receiveStream was canceled after it said it had data
-			continue
-		}
-		frames = append(frames, frame)
-		currentLen += frame.Length(f.version)
+
+		f.retransmissionQueue = f.retransmissionQueue[1:]
+		res = append(res, frame)
+		currentLen += frame.DataLen()
 	}
-	f.streamQueueMutex.Unlock()
-	return frames
+	return
+}
+
+func (f *streamFramer) maybePopNormalFrames(maxBytes protocol.ByteCount) (res []*wire.StreamFrame) {
+	frame := &wire.StreamFrame{DataLenPresent: true}
+	var currentLen protocol.ByteCount
+
+	fn := func(s streamI) (bool, error) {
+		if s == nil {
+			return true, nil
+		}
+
+		frame.StreamID = s.StreamID()
+		frame.Offset = s.GetWriteOffset()
+		// not perfect, but thread-safe since writeOffset is only written when getting data
+		frameHeaderBytes, _ := frame.MinLength(protocol.VersionWhatever) // can never error
+		if currentLen+frameHeaderBytes > maxBytes {
+			return false, nil // theoretically, we could find another stream that fits, but this is quite unlikely, so we stop here
+		}
+		maxLen := maxBytes - currentLen - frameHeaderBytes
+
+		var data []byte
+		if s.LenOfDataForWriting() > 0 {
+			data = s.GetDataForWriting(maxLen)
+		}
+
+		// This is unlikely, but check it nonetheless, the scheduler might have jumped in. Seems to happen in ~20% of cases in the tests.
+		shouldSendFin := s.ShouldSendFin()
+		if data == nil && !shouldSendFin {
+			return true, nil
+		}
+
+		if shouldSendFin {
+			frame.FinBit = true
+			s.SentFin()
+		}
+
+		frame.Data = data
+
+		// Finally, check if we are now FC blocked and should queue a BLOCKED frame
+		if !frame.FinBit && s.IsFlowControlBlocked() {
+			f.blockedFrameQueue = append(f.blockedFrameQueue, &wire.StreamBlockedFrame{StreamID: s.StreamID()})
+		}
+		if f.connFlowController.IsBlocked() {
+			f.blockedFrameQueue = append(f.blockedFrameQueue, &wire.BlockedFrame{})
+		}
+
+		res = append(res, frame)
+		currentLen += frameHeaderBytes + frame.DataLen()
+
+		if currentLen == maxBytes {
+			return false, nil
+		}
+
+		frame = &wire.StreamFrame{DataLenPresent: true}
+		return true, nil
+	}
+
+	f.streamsMap.RoundRobinIterate(fn)
+	return
+}
+
+// maybeSplitOffFrame removes the first n bytes and returns them as a separate frame. If n >= len(frame), nil is returned and nothing is modified.
+func maybeSplitOffFrame(frame *wire.StreamFrame, n protocol.ByteCount) *wire.StreamFrame {
+	if n >= frame.DataLen() {
+		return nil
+	}
+
+	defer func() {
+		frame.Data = frame.Data[n:]
+		frame.Offset += n
+	}()
+
+	return &wire.StreamFrame{
+		FinBit:         false,
+		StreamID:       frame.StreamID,
+		Offset:         frame.Offset,
+		Data:           frame.Data[:n],
+		DataLenPresent: frame.DataLenPresent,
+	}
 }
