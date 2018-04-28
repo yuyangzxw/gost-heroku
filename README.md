@@ -18,7 +18,7 @@ cd gost-heroku
     },    
     "NGROK_API_TOKEN": {
       "description": "ngrok authtoken",
-      "value": "4bzM2n2AJwEH3jD2mTxWP_6Vmy6iihkUa2HaDmCmv80" <-- 此处换成你的ngro认证字符串
+      "value": "4bzM2n2AJwEH3jD2mTxWP_6Vmy6iihkUa2HaDmCmv80" <-- 此处换成你的ngrok认证字符串
     },    
     "NGROK_COMMAND": {
       "description": "ngrok protocol",
