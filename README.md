@@ -21,7 +21,7 @@ cd gost-heroku
       "value": "4bzM2n2AJwEH3jD2mTxWP_6Vmy6iihkUa2HaDmCmv80" <-- 此处换成你的ngro认证字符串
     },    
     "NGROK_COMMAND": {
-      "description": "ngrok protol",
+      "description": "ngrok protocol",
       "value": "tcp"
     },
     "NGROK_OPTS": {
