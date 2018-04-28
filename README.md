@@ -36,6 +36,7 @@ web: with_ngrok gost -L=ss+ws://aes-128-cfb:1234567890@:$PORT -L=socks5://:9090
 ```
 接下来执行：
 ```sh
+heroku login
 heroku create yourappid
 heroku config:set NGROK_API_TOKEN=4bzM2n2AJwEH3jD2mTxWP_6Vmy6iihkUa2HaDmCmv80 -a yourappid
 heroku config:set AUX_PORT=9090 -a yourappid
