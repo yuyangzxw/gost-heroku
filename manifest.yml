@@ -1,3 +1,0 @@
----
-  env:
-    GOPACKAGENAME: github.com/xuiv/gost-heroku
