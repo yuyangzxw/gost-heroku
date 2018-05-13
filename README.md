@@ -32,7 +32,7 @@ cd gost-heroku
 ```
 修改Procfile为：
 ```
-web: with_ngrok gost -L=ss+ws://aes-128-cfb:1234567890@:$PORT -L=socks5://:9090
+web: with_ngrok gost-heroku -L=ss+ws://aes-128-cfb:1234567890@:$PORT -L=socks5://:9090
 ```
 接下来执行：
 ```sh
